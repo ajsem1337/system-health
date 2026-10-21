@@ -3,3 +3,6 @@ __pycache__/
 *.bak
 report-*.txt
 .venv/
+packaging/aur/src/
+packaging/aur/pkg/
+*.pkg.tar.*

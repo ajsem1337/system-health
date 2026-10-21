@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System Health
+Comment=Read-only Arch Linux and CachyOS health report
+Exec=system-health --smart --pause
+Icon=utilities-system-monitor
+Terminal=true
+Categories=System;Monitor;
