@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -52,6 +53,27 @@ def check_command(title, cmd, findings=False, timeout=30):
         item('WARNING' if findings and out else 'OK', title, out)
 
 
+def launch_terminal(full=False):
+    """Use terminal execution directly; desktop terminal handlers may open URLs."""
+    candidates = (
+        ('kitty', ['--']), ('kgx', ['--']), ('gnome-terminal', ['--']),
+        ('konsole', ['-e']), ('xfce4-terminal', ['--disable-server', '-x']),
+        ('foot', ['--']), ('alacritty', ['-e']), ('xterm', ['-e']),
+    )
+    command = [sys.executable, str(Path(__file__).resolve()), '--smart', '--pause']
+    if full:
+        command.append('--full')
+    for name, separator in candidates:
+        executable = shutil.which(name)
+        if executable:
+            subprocess.Popen([executable, *separator, *command], start_new_session=True)
+            return
+    message = 'No supported terminal found. Install kitty, kgx, gnome-terminal, konsole, xfce4-terminal, foot, alacritty or xterm.'
+    if shutil.which('notify-send'):
+        subprocess.run(['notify-send', 'System Health', message], check=False)
+    raise SystemExit(message)
+
+
 def main():
     counts.clear()
     report.clear()
@@ -59,7 +81,11 @@ def main():
     parser.add_argument('--full', action='store_true', help='also check installed package file presence')
     parser.add_argument('--smart', action='store_true', help='authenticate read-only SMART and package checks using sudo')
     parser.add_argument('--pause', action='store_true', help='wait for Enter before closing an interactive terminal')
+    parser.add_argument('--launch', action='store_true', help='open the report in a supported terminal emulator')
     args = parser.parse_args()
+    if args.launch:
+        launch_terminal(args.full)
+        return
     if args.smart:
         print('Read-only SMART and package checks require sudo authentication.', flush=True)
         subprocess.run(['sudo', '-v'])

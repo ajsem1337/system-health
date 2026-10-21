@@ -83,9 +83,34 @@ class HealthTests(unittest.TestCase):
             binary = home / '.local/bin/system-health'
             desktop = (home / 'data/applications/system-health.desktop').read_text()
             self.assertTrue(binary.stat().st_mode & 0o100)
-            self.assertIn(f'Exec="{binary}" --smart --pause', desktop)
+            self.assertIn(f'Exec="{binary}" --launch', desktop)
             self.assertNotIn(str(ROOT), desktop)
-            self.assertIn('Terminal=true', desktop)
+            self.assertIn('Terminal=false', desktop)
+
+    def test_launcher_executes_report_in_kitty_without_url_handler(self):
+        with patch.object(health.shutil, 'which', side_effect=lambda name: '/usr/bin/kitty' if name == 'kitty' else None), \
+             patch.object(health.subprocess, 'Popen') as spawn:
+            health.launch_terminal(full=True)
+        command = spawn.call_args.args[0]
+        self.assertEqual(command[:2], ['/usr/bin/kitty', '--'])
+        self.assertIn('--smart', command)
+        self.assertIn('--pause', command)
+        self.assertIn('--full', command)
+        self.assertNotIn('+open', command)
+        self.assertNotIn('--launch', command)
+
+    def test_launcher_falls_back_to_gnome_console(self):
+        with patch.object(health.shutil, 'which', side_effect=lambda name: '/usr/bin/kgx' if name == 'kgx' else None), \
+             patch.object(health.subprocess, 'Popen') as spawn:
+            health.launch_terminal()
+        self.assertEqual(spawn.call_args.args[0][:2], ['/usr/bin/kgx', '--'])
+
+    def test_launcher_reports_missing_terminal(self):
+        with patch.object(health.shutil, 'which', return_value=None), \
+             patch.object(health.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(SystemExit, 'No supported terminal'):
+                health.launch_terminal()
+        spawn.assert_not_called()
 
 
 if __name__ == '__main__':

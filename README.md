@@ -48,7 +48,7 @@ cd system-health
 python3 install.py
 ```
 
-This installs `~/.local/bin/system-health` and a **System Health** application-menu entry. The menu entry uses your desktop's default terminal, asks for sudo authentication for disk reads, and waits for Enter before closing.
+This installs `~/.local/bin/system-health` and a **System Health** application-menu entry. The menu entry directly starts a supported terminal (Kitty, GNOME Console/Terminal, Konsole, Xfce Terminal, foot, Alacritty or xterm), asks for sudo authentication for disk reads, and waits for Enter before closing. It does not rely on a desktop terminal handler that may interpret commands as URLs.
 
 ## Run
 

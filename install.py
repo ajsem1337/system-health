@@ -18,8 +18,8 @@ escaped = str(binary).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\
 desktop = '\n'.join([
     '[Desktop Entry]', 'Type=Application', 'Name=System Health',
     'Comment=Read-only Arch Linux and CachyOS health report',
-    f'Exec="{escaped}" --smart --pause',
-    'Icon=utilities-system-monitor', 'Terminal=true', 'Categories=System;Monitor;', '',
+    f'Exec="{escaped}" --launch',
+    'Icon=utilities-system-monitor', 'Terminal=false', 'Categories=System;Monitor;', '',
 ])
 (apps / 'system-health.desktop').write_text(desktop)
 print(f'Installed: {binary}')

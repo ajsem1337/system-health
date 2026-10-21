@@ -2,7 +2,7 @@
 Type=Application
 Name=System Health
 Comment=Read-only Arch Linux and CachyOS health report
-Exec=system-health --smart --pause
+Exec=system-health --launch
 Icon=utilities-system-monitor
-Terminal=true
+Terminal=false
 Categories=System;Monitor;
