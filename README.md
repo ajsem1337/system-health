@@ -36,6 +36,8 @@ makepkg -si
 
 This installs the command and menu entry system-wide using pacman. The recipe is prepared for AUR submission; its presence on GitHub does not mean it has been published to AUR.
 
+Maintainers can publish the recipe using the manual **Publish to AUR** GitHub Actions workflow. See the [one-time SSH secret setup](packaging/aur/README.md#publish-through-github-actions).
+
 ### Per-user installation
 
 From a checkout of this repository, as your normal desktop user:

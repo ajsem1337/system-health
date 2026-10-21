@@ -1,0 +1,65 @@
+name: Publish to AUR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-aur
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && github.repository == 'ajsem1337/system-health'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run regression tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Verify AUR metadata with makepkg
+        run: |
+          docker run --rm -v "$PWD:/source:ro" archlinux:base-devel bash -euc '
+            cp -a /source /tmp/source
+            chown -R nobody:nobody /tmp/source
+            runuser -u nobody -- bash -euc "
+              cd /tmp/source/packaging/aur
+              makepkg --printsrcinfo > /tmp/actual-srcinfo
+              diff -u .SRCINFO /tmp/actual-srcinfo
+            "
+          '
+
+      - name: Authenticate and publish recipe
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo '::error::Add the repository secret AUR_SSH_PRIVATE_KEY first. See packaging/aur/README.md.'
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/aur-publish-key"
+          hosts="$RUNNER_TEMP/aur-publish-known-hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          # Verify the server before using the credential. Fingerprint published at:
+          # https://archlinux.org/news/aur-migration-new-ssh-hostkeys/
+          ssh-keyscan -T 15 -t ed25519 aur.archlinux.org > "$hosts"
+          fingerprint=$(ssh-keygen -lf "$hosts" -E sha256 | awk '{print $2}' | sort -u)
+          if [[ "$fingerprint" != 'SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4' ]]; then
+            echo '::error::AUR host fingerprint mismatch. Verify the current official host key before updating this workflow.'
+            exit 1
+          fi
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$key"
+          unset AUR_SSH_PRIVATE_KEY
+          ssh-keygen -y -P '' -f "$key" > /dev/null
+          printf -v GIT_SSH_COMMAND 'ssh -F /dev/null -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q' "$key" "$hosts"
+          export GIT_SSH_COMMAND
+          python3 tools/publish_aur.py
