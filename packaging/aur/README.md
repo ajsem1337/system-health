@@ -29,7 +29,7 @@ An AUR account and an SSH key registered with AUR are required. GitHub credentia
 
 The **Publish to AUR** workflow runs manually from `main`. It runs tests, verifies `.SRCINFO` using Arch's `makepkg`, verifies the AUR server's SSH host fingerprint, then publishes only `PKGBUILD` and `.SRCINFO` to the AUR `master` branch. Existing history is retained, with no force push. Repeating a publication without changes is a no-op.
 
-This public repository uses a standard `ubuntu-latest` GitHub-hosted runner. Its execution time is free under [GitHub's public repository policy](https://docs.github.com/en/billing/concepts/product-billing/github-actions). The workflow does not upload artifacts or use paid larger runners.
+This public repository uses a standard `ubuntu-24.04` GitHub-hosted runner. Its execution time is free under [GitHub's public repository policy](https://docs.github.com/en/billing/concepts/product-billing/github-actions). The workflow does not upload artifacts or use paid larger runners.
 
 One-time setup:
 
