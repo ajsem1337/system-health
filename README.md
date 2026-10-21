@@ -25,6 +25,19 @@ sudo pacman -S --needed python pacutils rebuild-detector pacman-contrib lm_senso
 
 ## Install
 
+### Arch package
+
+An Arch package recipe is provided in [`packaging/aur`](packaging/aur). From a checkout:
+
+```sh
+cd packaging/aur
+makepkg -si
+```
+
+This installs the command and menu entry system-wide using pacman. The recipe is prepared for AUR submission; its presence on GitHub does not mean it has been published to AUR.
+
+### Per-user installation
+
 From a checkout of this repository, as your normal desktop user:
 
 ```sh
@@ -67,6 +80,12 @@ rm "${XDG_DATA_HOME:-$HOME/.local/share}/applications/system-health.desktop"
 ```
 
 Saved reports are retained.
+
+For a pacman-managed installation, use `sudo pacman -R system-health` instead. If migrating from a per-user installation to the package, remove the old user executable and menu entry as described in the [packaging notes](packaging/aur/README.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Tests
 
