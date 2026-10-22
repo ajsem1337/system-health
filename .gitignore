@@ -6,3 +6,8 @@ report-*.txt
 packaging/aur/src/
 packaging/aur/pkg/
 *.pkg.tar.*
+
+# Sources downloaded by makepkg alongside PKGBUILD
+/packaging/aur/system-health-*
+/packaging/aur/system-health.desktop
+/packaging/aur/LICENSE

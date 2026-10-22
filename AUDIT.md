@@ -19,8 +19,9 @@ GitHub workflows and Arch packaging. Baseline: `1446f40`.
 Validation: 31 regression tests pass on local Python 3.14, including simulated
 SMART flags and malformed tool output. CLI help/version, Python compilation,
 workflow actionlint, desktop-file validation and whitespace checks pass.
-Arch packaging is updated separately after publishing the source commit, so
-its immutable source reference and checksums can be verified against GitHub.
+Arch package 0.2.0-1 was built locally with makepkg using the published source
+commit. All three source checksums passed; generated .SRCINFO matches PKGBUILD.
+The package was built without installing it or its dependencies.
 
 Tests use temporary directories and a local bare Git remote. No actual AUR
 publication, sudo authentication, disk self-test, installed-package update or
