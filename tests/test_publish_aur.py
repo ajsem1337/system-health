@@ -35,6 +35,14 @@ class PublishTests(unittest.TestCase):
             count = subprocess.check_output(['git', '--git-dir', str(remote), 'rev-list', '--count', 'master'], text=True)
             self.assertEqual(count.strip(), '2')
 
+    def test_incomplete_version_is_rejected_before_cloning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recipe = Path(directory)
+            (recipe / '.SRCINFO').write_text('pkgbase = system-health\n')
+            with self.assertRaisesRegex(ValueError, 'version/release'):
+                publisher.publish(recipe, 'unused', recipe / 'destination')
+            self.assertFalse((recipe / 'destination').exists())
+
     def test_wrong_package_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             recipe = Path(directory)

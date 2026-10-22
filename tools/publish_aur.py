@@ -9,7 +9,7 @@ import tempfile
 
 def git(directory, *args, check=True):
     return subprocess.run(['git', '-C', str(directory), *args], check=check,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, timeout=120)
 
 
 def publish(recipe, remote, destination):
@@ -17,9 +17,12 @@ def publish(recipe, remote, destination):
     metadata = (recipe / '.SRCINFO').read_text()
     if not re.search(r'^pkgbase = system-health$', metadata, re.M):
         raise ValueError('Unexpected package base; refusing to publish.')
-    version = re.search(r'^\s+pkgver = (\S+)$', metadata, re.M).group(1)
-    release = re.search(r'^\s+pkgrel = (\S+)$', metadata, re.M).group(1)
-    subprocess.run(['git', 'clone', '--', str(remote), str(destination)], check=True)
+    versions = re.findall(r'^\s+pkgver = ([A-Za-z0-9._+]+)$', metadata, re.M)
+    releases = re.findall(r'^\s+pkgrel = ([0-9]+(?:\.[0-9]+)?)$', metadata, re.M)
+    if len(versions) != 1 or len(releases) != 1:
+        raise ValueError('Missing or invalid package version/release; refusing to publish.')
+    version, release = versions[0], releases[0]
+    subprocess.run(['git', 'clone', '--', str(remote), str(destination)], check=True, timeout=180)
     if git(destination, 'show-ref', '--verify', '--quiet', 'refs/remotes/origin/master', check=False).returncode == 0:
         git(destination, 'checkout', '-B', 'master', 'origin/master')
     elif git(destination, 'rev-parse', '--verify', 'HEAD', check=False).returncode == 0:

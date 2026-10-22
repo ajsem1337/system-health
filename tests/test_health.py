@@ -63,7 +63,7 @@ class HealthTests(unittest.TestCase):
         self.assertIn('[OK] Package file presence', self.report())
 
     def test_timeout_is_not_missing(self):
-        output = self.report('command timed out', 125)
+        output = self.report('command timed out', health.RUN_FAILED)
         self.assertIn('[NOT CHECKED] Other package-file check diagnostics', output)
         self.assertNotIn('[WARNING] Missing package files', output)
 

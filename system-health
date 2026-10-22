@@ -4,6 +4,7 @@ import argparse
 import collections
 import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -11,25 +12,37 @@ import shutil
 import subprocess
 import sys
 
+VERSION = '0.2.0'
+RUN_FAILED = 256  # Outside smartctl's eight-bit exit mask.
+
 counts = collections.Counter()
 report = []
 colors = {'OK': '32', 'WARNING': '33', 'ERROR': '31', 'NOT CHECKED': '36', 'INFO': '36'}
 
 
+def clean_text(value):
+    """Keep diagnostics as text, including in the full saved report."""
+    value = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_X].*?\x1b\\|\x1b\[[0-?]*[ -/]*[@-~]', '', str(value), flags=re.S)
+    return ''.join(c for c in value if c in '\n\t' or
+                   (ord(c) >= 32 and not 127 <= ord(c) <= 159 and
+                    c not in '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'))
+
+
 def say(text=''):
+    text = clean_text(text)
     report.append(text)
     print(text, flush=True)
 
 
 def item(status, title, details=''):
     counts[status] += 1
-    line = f'[{status}] {title}'
+    line = f'[{status}] {clean_text(title)}'
     report.append(line)
     print(f'\033[{colors[status]}m{line}\033[0m' if sys.stdout.isatty() else line, flush=True)
     if details:
-        lines = str(details).strip().splitlines()
+        lines = clean_text(details).strip().splitlines()
         for line in lines[:18]:
-            say('    ' + re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', line))
+            say('    ' + line)
         if len(lines) > 18:
             say(f'    … {len(lines)-18} more lines (included in the saved report).')
             report.extend('    ' + line for line in lines[18:])
@@ -38,19 +51,220 @@ def item(status, title, details=''):
 def run(cmd, timeout=30):
     try:
         p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
-                           text=True, errors='replace', timeout=timeout,
+                           text=True, encoding='utf-8', errors='replace', timeout=timeout,
                            env={**os.environ, 'LC_ALL': 'C', 'SYSTEMD_COLORS': '0', 'SYSTEMD_PAGER': 'cat'})
         return p.returncode, p.stdout.strip(), p.stderr.strip()
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return 125, '', str(e)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return RUN_FAILED, '', str(e)
 
 
 def check_command(title, cmd, findings=False, timeout=30):
     code, out, err = run(cmd, timeout)
     if code:
-        item('NOT CHECKED' if code == 125 or 'Operation not permitted' in err else 'WARNING', title, out or err)
+        item('NOT CHECKED' if code == RUN_FAILED or restricted_access(err) else 'WARNING', title, out or err)
     else:
         item('WARNING' if findings and out else 'OK', title, out)
+
+
+def restricted_access(diagnostic):
+    return any(s in diagnostic.lower() for s in
+               ('permission', 'not seeing', 'no journal files', 'access denied', 'operation not permitted'))
+
+
+def json_object(title, out, err=''):
+    try:
+        data = json.loads(out)
+        if not isinstance(data, dict):
+            raise ValueError('expected a JSON object')
+        return data
+    except ValueError as error:
+        item('NOT CHECKED', title, f'Invalid JSON: {error}\n{err or out}')
+        return None
+
+
+def finite_number(value):
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def check_memory():
+    try:
+        mem = {}
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            key, value = line.split(':', 1)
+            mem[key] = int(value.strip().split()[0])
+        total, available = mem['MemTotal'], mem['MemAvailable']
+        if total <= 0 or not 0 <= available <= total:
+            raise ValueError('invalid memory totals')
+    except (OSError, ValueError, KeyError, IndexError) as error:
+        item('NOT CHECKED', 'Available RAM', error)
+        return
+    item('WARNING' if available / total < .05 else 'OK', 'Available RAM',
+         f'{available/1048576:.1f} / {total/1048576:.1f} GiB available (including reclaimable cache)')
+
+
+def check_filesystems():
+    title = 'Filesystem capacity'
+    code, out, err = run(['findmnt', '--json', '--list', '--output', 'TARGET,FSTYPE', '--real'])
+    if code:
+        item('NOT CHECKED', title, err or out)
+        return
+    data = json_object(title, out, err)
+    if data is None:
+        return
+    filesystems = data.get('filesystems')
+    if not isinstance(filesystems, list):
+        item('NOT CHECKED', title, 'Missing or invalid filesystem list.')
+        return
+    checked = False
+    for fs in filesystems:
+        if not isinstance(fs, dict) or not isinstance(fs.get('target'), str) or not isinstance(fs.get('fstype'), str):
+            item('NOT CHECKED', title, 'Invalid filesystem entry.')
+            checked = True
+            continue
+        if fs['fstype'] not in {'xfs', 'ext4', 'btrfs', 'vfat', 'ntfs3', 'f2fs'}:
+            continue
+        checked = True
+        try:
+            st = os.statvfs(fs['target'])
+            if st.f_blocks <= 0:
+                raise ValueError('Filesystem reports no capacity.')
+            used = (st.f_blocks - st.f_bfree) / max(1, st.f_blocks - st.f_bfree + st.f_bavail)
+            inode_low = st.f_files > 0 and st.f_favail / st.f_files < .05
+            item('WARNING' if used >= .9 or inode_low else 'OK', f"Filesystem {fs['target']} ({fs['fstype']})",
+                 f'{used:.0%} used; {st.f_bavail*st.f_frsize/2**30:.1f} GiB free' + ('; low free inode count' if inode_low else ''))
+        except (OSError, ValueError) as error:
+            item('NOT CHECKED', fs['target'], error)
+    if not checked:
+        item('NOT CHECKED', title, 'No supported filesystems found.')
+
+
+def check_temperatures():
+    title = 'Temperature sensors'
+    code, out, err = run(['sensors', '-j'])
+    if code:
+        item('NOT CHECKED', title, err or out)
+        return
+    data = json_object(title, out, err)
+    if data is None:
+        return
+    found = False
+    for chip, groups in data.items():
+        if not chip.startswith(('k10temp-', 'coretemp-', 'amdgpu-', 'nouveau-', 'nvme-')):
+            continue
+        if not isinstance(groups, dict):
+            item('NOT CHECKED', chip, 'Invalid sensor data.')
+            found = True
+            continue
+        for label, values in groups.items():
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                if not re.fullmatch(r'temp\d+_input', key):
+                    continue
+                found = True
+                if not finite_number(value) or not -50 <= value <= 200:
+                    item('NOT CHECKED', f'{chip} / {label}', 'Invalid temperature reading.')
+                    continue
+                limit = values.get(key.removesuffix('_input') + '_crit')
+                valid_limit = finite_number(limit) and 0 < limit < 150
+                warning = value >= limit - 10 if valid_limit else value >= 85
+                item('WARNING' if warning else 'OK', f'{chip} / {label}',
+                     f'{value:.1f} °C' + (f'; sensor critical threshold {limit:.1f} °C' if valid_limit else '; fallback warning threshold: 85 °C'))
+    if not found:
+        item('NOT CHECKED', 'No supported CPU/GPU/NVMe temperature sensors found')
+    say('    Current temperatures only; this is not a stress test. Unidentified motherboard AUXTIN inputs are excluded.')
+
+
+def smart_status(code, passed, nvme):
+    # smartctl uses a bitmask, not a generic success/failure exit code.
+    if code < 0 or code > 255:
+        return 'NOT CHECKED'
+    failed = passed is False or bool(code & 8) or bool(nvme.get('critical_warning'))
+    if failed:
+        return 'ERROR'
+    if code & 7:
+        return 'NOT CHECKED'
+    warn = bool(code & 240) or nvme.get('percentage_used', 0) >= 100 or bool(nvme.get('media_errors'))
+    if warn:
+        return 'WARNING'
+    return 'OK' if passed is True else 'NOT CHECKED'
+
+
+def check_disks():
+    prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
+    code, out, err = run(prefix + ['smartctl', '--scan', '-j'])
+    if code:
+        item('NOT CHECKED', 'Unable to enumerate SMART disks',
+             (err or out) + '\nRun system-health --smart to authenticate SMART reads, or open GSmartControl.')
+        return
+    scan = json_object('SMART disk enumeration', out, err)
+    if scan is None:
+        return
+    devices = scan.get('devices')
+    if not isinstance(devices, list) or not devices:
+        item('NOT CHECKED', 'Unable to enumerate SMART disks', 'No SMART devices returned.')
+        return
+    for dev in devices:
+        if not isinstance(dev, dict) or not isinstance(dev.get('name'), str) or not dev['name'].startswith('/dev/') or not isinstance(dev.get('type'), str):
+            item('NOT CHECKED', 'SMART disk enumeration', 'Invalid device entry.')
+            continue
+        name = dev['name']
+        code, out, err = run(prefix + ['smartctl', '-a', '-j', '-d', dev['type'], name], 45)
+        data = json_object(name + ' — SMART', out, err)
+        if data is None:
+            continue
+        smart = data.get('smart_status', {})
+        nvme = data.get('nvme_smart_health_information_log', {})
+        if not isinstance(smart, dict) or not isinstance(nvme, dict) or any(
+            not finite_number(nvme[key]) or nvme[key] < 0 for key in
+            ('percentage_used', 'available_spare', 'media_errors', 'critical_warning') if key in nvme
+        ):
+            item('NOT CHECKED', name + ' — SMART', 'Invalid SMART health data.')
+            continue
+        passed = smart.get('passed')
+        details = [str(data.get('model_name', name)), f'smartctl exit status: {code}']
+        for key, label in [('percentage_used', 'Endurance used (%)'), ('available_spare', 'Available spare (%)'),
+                           ('media_errors', 'Media errors (lifetime counter)'), ('critical_warning', 'Critical warning flags')]:
+            if key in nvme:
+                details.append(f'{label}: {nvme[key]}')
+        temp = data.get('temperature')
+        if isinstance(temp, dict) and finite_number(temp.get('current')):
+            details.append(f"Temperature: {temp['current']} °C")
+        diagnostics = data.get('smartctl')
+        messages = diagnostics.get('messages') if isinstance(diagnostics, dict) else None
+        if isinstance(messages, list):
+            details.extend(str(message.get('string', '')) for message in messages if isinstance(message, dict))
+        if err:
+            details.append(err)
+        item(smart_status(code, passed, nvme), name + ' — SMART', '\n'.join(details))
+    say('    No SMART self-tests are started. Compare historical error counters over time using GSmartControl.')
+
+
+def xdg_directory(variable, default):
+    value = os.environ.get(variable, '')
+    return Path(value) if value and Path(value).is_absolute() else default
+
+
+def save_report():
+    folder = xdg_directory('XDG_STATE_HOME', Path.home() / '.local/state') / 'system-health'
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Open the owned directory without following a final symlink, then create
+    # the report relative to its descriptor to avoid path replacement races.
+    directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(directory).st_uid != os.geteuid():
+            raise PermissionError('Report directory is owned by another user.')
+        os.fchmod(directory, 0o700)
+        name = 'report-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.txt'
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        with os.fdopen(fd, 'w', encoding='utf-8') as output:
+            output.write('\n'.join(report) + '\n')
+    finally:
+        os.close(directory)
+    return folder / name
 
 
 def launch_terminal(full=False):
@@ -66,8 +280,11 @@ def launch_terminal(full=False):
     for name, separator in candidates:
         executable = shutil.which(name)
         if executable:
-            subprocess.Popen([executable, *separator, *command], start_new_session=True)
-            return
+            try:
+                subprocess.Popen([executable, *separator, *command], start_new_session=True)
+                return
+            except OSError:
+                continue
     message = 'No supported terminal found. Install kitty, kgx, gnome-terminal, konsole, xfce4-terminal, foot, alacritty or xterm.'
     if shutil.which('notify-send'):
         subprocess.run(['notify-send', 'System Health', message], check=False)
@@ -78,6 +295,7 @@ def main():
     counts.clear()
     report.clear()
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', action='version', version=f'%(prog)s {VERSION}')
     parser.add_argument('--full', action='store_true', help='also check installed package file presence')
     parser.add_argument('--smart', action='store_true', help='authenticate read-only SMART and package checks using sudo')
     parser.add_argument('--pause', action='store_true', help='wait for Enter before closing an interactive terminal')
@@ -86,25 +304,32 @@ def main():
     if args.launch:
         launch_terminal(args.full)
         return
-    if args.smart:
+    authentication_error = ''
+    if args.smart and os.geteuid() != 0:
         print('Read-only SMART and package checks require sudo authentication.', flush=True)
-        subprocess.run(['sudo', '-v'])
+        try:
+            if subprocess.run(['sudo', '-v'], check=False).returncode:
+                authentication_error = 'sudo authentication failed; remaining checks will continue.'
+        except OSError as error:
+            authentication_error = str(error)
 
     say('SYSTEM HEALTH — ' + datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z'))
     say('Read-only checks. Review warnings; NOT CHECKED does not mean healthy.\n')
+    if authentication_error:
+        item('NOT CHECKED', 'Privileged check authentication', authentication_error)
     say('SERVICES AND EVENTS')
     check_command('Failed system services', ['systemctl', '--failed', '--no-legend', '--plain'], True)
     check_command('Failed user services', ['systemctl', '--user', '--failed', '--no-legend', '--plain'], True)
     code, out, err = run(['journalctl', '-b', '-p', 'err', '--no-pager', '-q', '-n', '60', '-o', 'short-iso'])
-    restricted = any(s in err.lower() for s in ['permission', 'not seeing', 'no journal files'])
+    restricted = restricted_access(err)
     item('NOT CHECKED' if code or restricted else ('WARNING' if out else 'OK'),
          'Current boot errors — up to 60 latest entries', '\n'.join(filter(None, [out, err])))
     say('    A log entry may describe a one-off event rather than a current failure.')
     code, out, err = run(['coredumpctl', '--since', '24 hours ago', '--no-pager', '--no-legend', 'list'])
-    if not out and 'No coredumps found' in err:
+    if code in (0, 1) and not out and 'No coredumps found' in err and not restricted_access(err):
         item('OK', 'Recorded application crashes in the last 24 hours', 'No recorded core dumps; some crashes do not produce one.')
     else:
-        item('NOT CHECKED' if code else ('WARNING' if out else 'OK'),
+        item('NOT CHECKED' if code or restricted_access(err) else ('WARNING' if out else 'OK'),
              'Recorded application crashes in the last 24 hours', out or err)
     code, out, err = run(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value'])
     item('NOT CHECKED' if code else ('OK' if out == 'yes' else 'WARNING'), 'Clock synchronization', err if code else out)
@@ -121,7 +346,9 @@ def main():
         cmd = ([] if os.geteuid() == 0 or not privileged else ['sudo', '-n']) + ['paccheck', '--files', '--quiet']
         code, out, err = run(cmd, 180)
         groups = {'missing': [], 'permissions': [], 'other': []}
-        for line in (out + '\n' + err).splitlines():
+        if code == RUN_FAILED:
+            groups['other'].append(out or err or 'Package-file check could not run.')
+        for line in (out + '\n' + err).splitlines() if code != RUN_FAILED else []:
             if not line.strip():
                 continue
             if 'Permission denied' in line or 'Operation not permitted' in line:
@@ -143,104 +370,32 @@ def main():
         item('INFO', 'Package file presence check skipped', 'Run: system-health --full')
 
     say('\nMEMORY AND STORAGE')
-    mem = {}
-    for line in Path('/proc/meminfo').read_text().splitlines():
-        key, value = line.split(':', 1)
-        mem[key] = int(value.strip().split()[0])
-    available = mem.get('MemAvailable', 0) / mem['MemTotal']
-    item('WARNING' if available < .05 else 'OK', 'Available RAM',
-         f"{mem.get('MemAvailable', 0)/1048576:.1f} / {mem['MemTotal']/1048576:.1f} GiB available (including reclaimable cache)")
-    code, out, err = run(['findmnt', '--json', '--list', '--output', 'TARGET,FSTYPE', '--real'])
-    if code:
-        item('NOT CHECKED', 'Filesystem capacity', err)
-    else:
-        for fs in json.loads(out).get('filesystems', []):
-            if fs['fstype'] not in {'xfs', 'ext4', 'btrfs', 'vfat', 'ntfs3', 'f2fs'}:
-                continue
-            try:
-                st = os.statvfs(fs['target'])
-                used = (st.f_blocks - st.f_bfree) / max(1, st.f_blocks - st.f_bfree + st.f_bavail)
-                inode_low = st.f_files > 0 and st.f_favail / st.f_files < .05
-                item('WARNING' if used >= .9 or inode_low else 'OK', f"Filesystem {fs['target']} ({fs['fstype']})",
-                     f'{used:.0%} used; {st.f_bavail*st.f_frsize/2**30:.1f} GiB free' + ('; low free inode count' if inode_low else ''))
-            except OSError as e:
-                item('NOT CHECKED', fs['target'], e)
+    check_memory()
+    check_filesystems()
 
     say('\nTEMPERATURES')
-    code, out, err = run(['sensors', '-j'])
-    if code:
-        item('NOT CHECKED', 'Temperature sensors', err)
-    else:
-        found = False
-        for chip, groups in json.loads(out).items():
-            # Unlabelled AUXTIN inputs on motherboards often report disconnected probes.
-            if not chip.startswith(('k10temp-', 'coretemp-', 'amdgpu-', 'nouveau-', 'nvme-')):
-                continue
-            for label, values in groups.items():
-                if not isinstance(values, dict):
-                    continue
-                for key, value in values.items():
-                    if not re.fullmatch(r'temp\d+_input', key):
-                        continue
-                    found = True
-                    prefix = key.removesuffix('_input')
-                    limit = values.get(prefix + '_crit')
-                    warning = value >= limit - 10 if limit and 0 < limit < 150 else value >= 85
-                    item('WARNING' if warning else 'OK', f'{chip} / {label}',
-                         f'{value:.1f} °C' + (f'; sensor critical threshold {limit:.1f} °C' if limit and 0 < limit < 150 else '; fallback warning threshold: 85 °C'))
-        if not found:
-            item('NOT CHECKED', 'No supported CPU/GPU/NVMe temperature sensors found')
-        say('    Current temperatures only; this is not a stress test. Unidentified motherboard AUXTIN inputs are excluded.')
+    check_temperatures()
 
     say('\nDISK HEALTH: SMART / NVMe')
-    prefix = [] if os.geteuid() == 0 else ['sudo', '-n']
-    code, out, err = run(prefix + ['smartctl', '--scan', '-j'])
-    try:
-        scan = json.loads(out)
-    except ValueError:
-        scan = {}
-    if code or not scan.get('devices'):
-        item('NOT CHECKED', 'Unable to enumerate SMART disks',
-             (err or out) + '\nRun system-health --smart to authenticate SMART reads, or open GSmartControl.')
-    else:
-        for dev in scan['devices']:
-            cmd = prefix + ['smartctl', '-a', '-j', '-d', dev['type'], dev['name']]
-            code, out, err = run(cmd, 45)
-            try:
-                data = json.loads(out)
-            except ValueError:
-                item('NOT CHECKED', dev['name'], err or out)
-                continue
-            passed = data.get('smart_status', {}).get('passed')
-            nvme = data.get('nvme_smart_health_information_log', {})
-            details = [data.get('model_name', dev['name'])]
-            for key, label in [('percentage_used', 'Endurance used (%)'), ('available_spare', 'Available spare (%)'),
-                               ('media_errors', 'Media errors (lifetime counter)'), ('critical_warning', 'Critical warning flags')]:
-                if key in nvme:
-                    details.append(f'{label}: {nvme[key]}')
-            temp = data.get('temperature', {}).get('current')
-            if temp is not None:
-                details.append(f'Temperature: {temp} °C')
-            failed = passed is False or bool(nvme.get('critical_warning'))
-            warn = bool(code & 248) or nvme.get('percentage_used', 0) >= 100 or bool(nvme.get('media_errors'))
-            status = 'ERROR' if failed else ('WARNING' if warn else ('NOT CHECKED' if code & 7 or passed is None else 'OK'))
-            for message in data.get('smartctl', {}).get('messages', []):
-                details.append(message.get('string', ''))
-            item(status, dev['name'] + ' — SMART', '\n'.join(details))
-        say('    No SMART self-tests are started. Compare historical error counters over time using GSmartControl.')
+    check_disks()
 
     say('\nSUMMARY')
     say(' | '.join(f'{key}: {counts[key]}' for key in ['OK', 'WARNING', 'ERROR', 'NOT CHECKED']))
     say('This report does not check package updates, security vulnerabilities, or stability under load.')
-    folder = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'system-health'
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = folder / ('report-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.txt')
-    with open(path, 'x', encoding='utf-8', opener=lambda name, flags: os.open(name, flags, 0o600)) as output:
-        output.write('\n'.join(report) + '\n')
-    print(f'\nFull report: {path}')
+    result = 0
+    try:
+        path = save_report()
+        print(f'\nFull report: {clean_text(path)}')
+    except OSError as error:
+        print(f'\nUnable to save report: {clean_text(error)}', file=sys.stderr)
+        result = 1
     if args.pause and sys.stdin.isatty():
-        input('\nPress Enter to close…')
+        try:
+            input('\nPress Enter to close…')
+        except EOFError:
+            pass
+    return result
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

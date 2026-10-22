@@ -15,7 +15,7 @@ Results use **OK**, **WARNING**, **ERROR**, **NOT CHECKED**, and **INFO**. A war
 
 ## Dependencies
 
-Python 3.9+, systemd, pacman and util-linux, plus:
+Python 3.11+, systemd, pacman and util-linux, plus:
 
 ```sh
 sudo pacman -S --needed python pacutils rebuild-detector pacman-contrib lm_sensors smartmontools sudo
@@ -62,7 +62,8 @@ This installs `~/.local/bin/system-health` and a **System Health** application-m
 
 Run the program as your regular user. `--smart` authenticates sudo; individual SMART reads and, with `--full`, the package file check can then use it. Running the whole program as root changes which user's services are checked. Without permission, a check is marked **NOT CHECKED**, not healthy or missing.
 
-Reports are saved with owner-only permissions under `$XDG_STATE_HOME/system-health`, defaulting to `~/.local/state/system-health`. They remain local; nothing is uploaded. Reports can contain paths, package names and journal entries: review them before sharing.
+Reports and their directory use owner-only permissions. Terminal control sequences
+are stripped from diagnostics before display and storage. Reports are saved under `$XDG_STATE_HOME/system-health`, defaulting to `~/.local/state/system-health`. They remain local; nothing is uploaded. Reports can contain paths, package names and journal entries: review them before sharing.
 
 ## Limits
 
@@ -72,7 +73,7 @@ Reports are saved with owner-only permissions under `$XDG_STATE_HOME/system-heal
 - Historical journal entries and disk error counters are not necessarily current failures.
 - Temperature checks cover `k10temp`, `coretemp`, `amdgpu`, `nouveau` and NVMe sensor families. Unidentified motherboard AUXTIN inputs are excluded. Unsupported hardware is not a successful temperature check.
 - Package file checks verify presence, not content hashes. Temperature and capacity thresholds are heuristics.
-- Intended for an interactive report: exit status is not an aggregate health verdict.
+- Intended for an interactive report: exit status is not an aggregate health verdict. A report-write failure returns exit status 1.
 
 ## Uninstall
 
@@ -94,3 +95,18 @@ MIT. See [LICENSE](LICENSE).
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+## Version 0.2.0
+
+Malformed or incomplete JSON from disk, mount and sensor tools is reported as
+**NOT CHECKED** while the remaining checks continue. Missing `paccheck` is
+reported separately from missing package files. Restricted crash journals are
+never reported as a clean crash check.
+
+SMART status follows the [smartctl exit-status bitmask](https://github.com/smartmontools/smartmontools/blob/master/smartmontools/smartctl.8.in):
+a failing-health flag is an **ERROR**, while incomplete device access remains
+**NOT CHECKED**. Invalid temperature readings are excluded from healthy results.
+
+The user installer replaces files atomically, preserving the targets of existing
+symlinks. Relative XDG directory settings fall back to the standard home paths.
+Use `system-health --version` to check the installed version.
