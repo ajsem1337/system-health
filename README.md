@@ -1,5 +1,7 @@
 # System Health
 
+![Made with AI](https://img.shields.io/badge/Made%20with-AI-76ddcf)
+
 A readable, read-only health report for CachyOS and Arch Linux. Written in Python using only the standard library, with English output and an optional application-menu shortcut.
 
 ## What it checks
@@ -110,3 +112,7 @@ a failing-health flag is an **ERROR**, while incomplete device access remains
 The user installer replaces files atomically, preserving the targets of existing
 symlinks. Relative XDG directory settings fall back to the standard home paths.
 Use `system-health --version` to check the installed version.
+
+## AI assistance
+
+**Made with AI.** This project was developed with AI assistance, including code, documentation, and testing.
