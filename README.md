@@ -13,7 +13,11 @@ A readable, read-only health report for CachyOS and Arch Linux. Written in Pytho
 - Supported CPU, GPU and NVMe temperature sensors.
 - SMART health and NVMe endurance/error counters.
 
-Results use **OK**, **WARNING**, **ERROR**, **NOT CHECKED**, and **INFO**. A warning is something to review, not an instruction to reinstall or delete anything. Missing tools, denied permissions and timeouts are reported explicitly.
+The default output is one compact overview with **OK**, **REVIEW**, **ERROR**,
+**PARTIAL**, **NOT CHECKED**, and **INFO**. It groups normal readings and keeps
+recent log history separate from current findings. Missing permissions stay
+visible as unchecked coverage. The saved report always contains full diagnostics
+and the original check statuses. Use `--verbose` to display those details.
 
 ## Dependencies
 
@@ -55,11 +59,14 @@ This installs `~/.local/bin/system-health` and a **System Health** application-m
 ## Run
 
 ```sh
-# Basic checks; no password prompt
-~/.local/bin/system-health
+# Compact overview; no password prompt
+system-health
 
 # Authenticate SMART reads and check installed package file presence
-~/.local/bin/system-health --smart --full
+system-health --smart --full
+
+# Show detailed diagnostics in the terminal
+system-health --verbose
 ```
 
 Run the program as your regular user. `--smart` authenticates sudo; individual SMART reads and, with `--full`, the package file check can then use it. Running the whole program as root changes which user's services are checked. Without permission, a check is marked **NOT CHECKED**, not healthy or missing.
@@ -71,7 +78,7 @@ are stripped from diagnostics before display and storage. Reports are saved unde
 
 - No repairs, updates, cleanup, configuration changes, SMART self-tests or stress tests are performed. Local report files are written.
 - Does not check available package updates, vulnerability advisories, or firmware updates.
-- `checkrebuild` may flag optional libraries or libraries found through an application's private search path. Its verbose diagnostics are included for review.
+- `checkrebuild` may flag optional libraries or libraries found through an application's private search path. Detailed diagnostics are saved in the full report.
 - Historical journal entries and disk error counters are not necessarily current failures.
 - Temperature checks cover `k10temp`, `coretemp`, `amdgpu`, `nouveau` and NVMe sensor families. Unidentified motherboard AUXTIN inputs are excluded. Unsupported hardware is not a successful temperature check.
 - Package file checks verify presence, not content hashes. Temperature and capacity thresholds are heuristics.
@@ -97,6 +104,15 @@ MIT. See [LICENSE](LICENSE).
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+## Version 0.3.0
+
+The default terminal view fits a single overview: services, available RAM and
+filesystem usage, peak CPU/GPU/NVMe temperatures, disk health, package checks,
+pending configuration files and recent history. Current problems retain their
+severity; recorded journal entries and past app crashes appear as history.
+`--full` adds package file checks, while `--verbose` expands terminal output.
+All diagnostic detail is retained in the private report file in either mode.
 
 ## Version 0.2.0
 

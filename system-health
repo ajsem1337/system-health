@@ -11,12 +11,16 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 RUN_FAILED = 256  # Outside smartctl's eight-bit exit mask.
 
 counts = collections.Counter()
 report = []
+results = []
+current_group = 'Other'
+display_verbose = True
 colors = {'OK': '32', 'WARNING': '33', 'ERROR': '31', 'NOT CHECKED': '36', 'INFO': '36'}
 
 
@@ -31,14 +35,18 @@ def clean_text(value):
 def say(text=''):
     text = clean_text(text)
     report.append(text)
-    print(text, flush=True)
+    if display_verbose:
+        print(text, flush=True)
 
 
-def item(status, title, details=''):
+def item(status, title, details='', *, group=None, facts=None):
     counts[status] += 1
+    results.append(dict(status=status, title=clean_text(title), details=clean_text(details),
+                        group=group or current_group, facts=facts or {}))
     line = f'[{status}] {clean_text(title)}'
     report.append(line)
-    print(f'\033[{colors[status]}m{line}\033[0m' if sys.stdout.isatty() else line, flush=True)
+    if display_verbose:
+        print(f'\033[{colors[status]}m{line}\033[0m' if sys.stdout.isatty() else line, flush=True)
     if details:
         lines = clean_text(details).strip().splitlines()
         for line in lines[:18]:
@@ -46,6 +54,148 @@ def item(status, title, details=''):
         if len(lines) > 18:
             say(f'    … {len(lines)-18} more lines (included in the saved report).')
             report.extend('    ' + line for line in lines[18:])
+
+
+def section(group, title):
+    global current_group
+    current_group = group
+    say(title)
+
+
+def short_check(result):
+    title, details = result['title'], result['details']
+    if title == 'Package database and dependency consistency':
+        packages = list(dict.fromkeys(re.findall(r"(?:error|warning): '([^']+)'", details)))
+        return f'database: {len(packages)} ' + ('entry' if len(packages) == 1 else 'entries') if packages else 'database needs review'
+    if title.startswith('Potential package linkage'):
+        packages = list(dict.fromkeys(re.findall(r'^(?:foreign|native)\s+(\S+)', details, re.M)))
+        if packages:
+            return f'library links: {len(packages)} ' + ('package' if len(packages) == 1 else 'packages')
+        return 'library links need review'
+    if title.startswith('Filesystem '):
+        return title.split(' (', 1)[0].replace('Filesystem ', '') + ': ' + details
+    if title.startswith('Missing package files'):
+        return f'{len(details.splitlines())} missing-file findings'
+    if title == 'Available RAM':
+        return 'RAM: ' + details
+    if title.startswith('Failed system services'):
+        return 'system services need review' if result['status'] == 'WARNING' else 'system services unavailable'
+    if title.startswith('Failed user services'):
+        return 'user services need review' if result['status'] == 'WARNING' else 'user services unavailable'
+    if title == 'Clock synchronization':
+        return 'clock not synchronized' if result['status'] == 'WARNING' else 'clock check unavailable'
+    if title.endswith(' — SMART'):
+        return title.removesuffix(' — SMART') + ': ' + (
+            'SMART health failure' if result['status'] == 'ERROR' else
+            'SMART findings to review' if result['status'] == 'WARNING' else 'SMART incomplete')
+    return title
+
+
+def group_state(rows, history=False):
+    states = {row['status'] for row in rows}
+    if 'ERROR' in states:
+        return 'ERROR'
+    if 'WARNING' in states and not history:
+        return 'REVIEW'
+    if 'NOT CHECKED' in states:
+        return 'PARTIAL' if states & {'OK', 'WARNING'} else 'NOT CHECKED'
+    return 'INFO' if history or states == {'INFO'} else 'OK'
+
+
+def group_summary(group, rows):
+    problems = [r for r in rows if r['status'] in {'ERROR', 'WARNING', 'NOT CHECKED'}]
+    if group == 'History':
+        parts = []
+        for row in rows:
+            if row['status'] == 'NOT CHECKED':
+                parts.append('some logs unavailable')
+            elif row['status'] == 'WARNING':
+                if row['title'].startswith('Recorded application crashes'):
+                    parts.append(f"{len(row['details'].strip().splitlines())} app crashes / 24h")
+                else:
+                    parts.append('boot-log entries')
+        return 'Past events: ' + '; '.join(dict.fromkeys(parts)) if parts else 'No recorded errors or app crashes'
+    if group == 'Temperatures':
+        peaks = {}
+        for row in rows:
+            for family, value in row['facts'].get('temperatures', {}).items():
+                peaks[family] = max(peaks.get(family, value), value)
+        parts = [f'{family} {peaks[family]:.0f}°C' for family in ('CPU', 'GPU', 'NVMe') if family in peaks]
+        if any(r['status'] == 'WARNING' for r in rows):
+            parts.append('high reading; check cooling')
+        unknown = sum(r['status'] == 'NOT CHECKED' for r in rows)
+        if unknown:
+            parts.append(f'{unknown} reading' + ('s' if unknown != 1 else '') + ' unavailable')
+        return ' | '.join(parts) or 'No supported readings available'
+    if group == 'RAM / storage' and not problems:
+        parts = [r['facts']['brief'] for r in rows if 'brief' in r['facts']]
+        mounts = [r['facts']['used'] for r in rows if 'used' in r['facts']]
+        if mounts:
+            parts.append(f'{len(mounts)} filesystems; fullest {max(mounts):.0%}')
+        return '; '.join(parts)
+    if group == 'Disk health' and problems:
+        if all(r['status'] == 'NOT CHECKED' for r in rows):
+            diagnostic = ' '.join(r['details'] for r in rows).lower()
+            if any(token in diagnostic for token in ('password', 'authentication')):
+                return 'Run system-health --smart'
+            return 'SMART unavailable; see full report'
+    if group == 'Config files':
+        pending = sum(len(r['details'].strip().splitlines()) for r in rows if r['status'] == 'WARNING')
+        if pending:
+            return f'{pending} .pacnew / .pacsave files to review'
+        return 'Check unavailable' if problems else 'No pending .pacnew / .pacsave files'
+    if problems:
+        ordered = sorted(problems, key=lambda r: {'ERROR': 0, 'WARNING': 1, 'NOT CHECKED': 2}[r['status']])
+        summaries = list(dict.fromkeys(short_check(r) for r in ordered))
+        return '; '.join(summaries[:2]) + (f'; +{len(summaries)-2} more in report' if len(summaries) > 2 else '')
+    return {
+        'Services': 'No failed services; clock synchronized',
+        'Packages': 'Database and library checks passed',
+        'Disk health': f'{len(rows)} disk' + ('s' if len(rows) != 1 else '') + ' checked',
+    }.get(group, f'{len(rows)} check(s) completed')
+
+
+def render_compact():
+    """One overview; raw diagnostics remain in the full report."""
+    groups = collections.OrderedDict((name, []) for name in (
+        'Services', 'RAM / storage', 'Temperatures', 'Disk health', 'Packages', 'Config files', 'History'))
+    for row in results:
+        groups.setdefault(row['group'], []).append(row)
+    errors = sum(r['status'] == 'ERROR' for r in results)
+    review = sum(r['status'] == 'WARNING' and r['group'] != 'History' for r in results)
+    unknown = sum(r['status'] == 'NOT CHECKED' for r in results)
+    completed = sum(r['status'] in {'OK', 'WARNING', 'ERROR'} for r in results)
+    print('\n' + report[0])
+    if errors:
+        print(f'ATTENTION — {errors} reported error' + ('s.' if errors != 1 else '.'))
+    elif review:
+        print(f'REVIEW — {review} item' + ('s' if review != 1 else '') + ' to review; no critical findings in completed checks.')
+    elif not completed or unknown:
+        print('INCOMPLETE — some checks were unavailable.')
+    else:
+        print('OK — no issues found in completed checks.')
+    print()
+    width = max(60, min(shutil.get_terminal_size(fallback=(100, 24)).columns, 100))
+    palette = {'OK': '32', 'REVIEW': '33', 'ERROR': '31', 'PARTIAL': '36', 'NOT CHECKED': '36', 'INFO': '36'}
+    for group, rows in groups.items():
+        if not rows:
+            continue
+        state = group_state(rows, history=group == 'History')
+        summary = group_summary(group, rows)
+        prefix = f'  {group:<14} {state:<11} '
+        line = prefix + textwrap.shorten(clean_text(summary), width=width-len(prefix), placeholder='…')
+        if sys.stdout.isatty():
+            line = f'\033[{palette[state]}m{line}\033[0m'
+        print(line)
+    print()
+    if unknown:
+        print(f'Coverage: {unknown} check' + ('s' if unknown != 1 else '') + ' unavailable; see full report.')
+    if any(r['title'] == 'Package file presence check skipped' for r in results):
+        print('More checks: system-health --smart --full')
+    if any(r['group'] == 'Disk health' and r['status'] == 'ERROR' for r in results):
+        print('Next: back up important data and inspect the disk findings in the full report.')
+    elif review:
+        print('Next: review the marked checks. Log history alone does not establish a current failure.')
 
 
 def run(cmd, timeout=30):
@@ -102,7 +252,8 @@ def check_memory():
         item('NOT CHECKED', 'Available RAM', error)
         return
     item('WARNING' if available / total < .05 else 'OK', 'Available RAM',
-         f'{available/1048576:.1f} / {total/1048576:.1f} GiB available (including reclaimable cache)')
+         f'{available/1048576:.1f} / {total/1048576:.1f} GiB available (including reclaimable cache)',
+         facts={'brief': f'RAM {available/1048576:.1f}/{total/1048576:.1f} GiB available'})
 
 
 def check_filesystems():
@@ -134,7 +285,7 @@ def check_filesystems():
             used = (st.f_blocks - st.f_bfree) / max(1, st.f_blocks - st.f_bfree + st.f_bavail)
             inode_low = st.f_files > 0 and st.f_favail / st.f_files < .05
             item('WARNING' if used >= .9 or inode_low else 'OK', f"Filesystem {fs['target']} ({fs['fstype']})",
-                 f'{used:.0%} used; {st.f_bavail*st.f_frsize/2**30:.1f} GiB free' + ('; low free inode count' if inode_low else ''))
+                 f'{used:.0%} used; {st.f_bavail*st.f_frsize/2**30:.1f} GiB free' + ('; low free inode count' if inode_low else ''), facts={'used': used})
         except (OSError, ValueError) as error:
             item('NOT CHECKED', fs['target'], error)
     if not checked:
@@ -171,8 +322,10 @@ def check_temperatures():
                 limit = values.get(key.removesuffix('_input') + '_crit')
                 valid_limit = finite_number(limit) and 0 < limit < 150
                 warning = value >= limit - 10 if valid_limit else value >= 85
+                family = 'CPU' if chip.startswith(('k10temp-', 'coretemp-')) else 'GPU' if chip.startswith(('amdgpu-', 'nouveau-')) else 'NVMe'
                 item('WARNING' if warning else 'OK', f'{chip} / {label}',
-                     f'{value:.1f} °C' + (f'; sensor critical threshold {limit:.1f} °C' if valid_limit else '; fallback warning threshold: 85 °C'))
+                     f'{value:.1f} °C' + (f'; sensor critical threshold {limit:.1f} °C' if valid_limit else '; fallback warning threshold: 85 °C'),
+                     facts={'temperatures': {family: value}})
     if not found:
         item('NOT CHECKED', 'No supported CPU/GPU/NVMe temperature sensors found')
     say('    Current temperatures only; this is not a stress test. Unidentified motherboard AUXTIN inputs are excluded.')
@@ -267,7 +420,7 @@ def save_report():
     return folder / name
 
 
-def launch_terminal(full=False):
+def launch_terminal(full=False, verbose=False):
     """Use terminal execution directly; desktop terminal handlers may open URLs."""
     candidates = (
         ('kitty', ['--']), ('kgx', ['--']), ('gnome-terminal', ['--']),
@@ -277,6 +430,8 @@ def launch_terminal(full=False):
     command = [sys.executable, str(Path(__file__).resolve()), '--smart', '--pause']
     if full:
         command.append('--full')
+    if verbose:
+        command.append('--verbose')
     for name, separator in candidates:
         executable = shutil.which(name)
         if executable:
@@ -292,18 +447,25 @@ def launch_terminal(full=False):
 
 
 def main():
+    global display_verbose
     counts.clear()
     report.clear()
+    results.clear()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=f'%(prog)s {VERSION}')
+    parser.add_argument('--verbose', action='store_true', help='show the full diagnostic report in the terminal')
     parser.add_argument('--full', action='store_true', help='also check installed package file presence')
     parser.add_argument('--smart', action='store_true', help='authenticate read-only SMART and package checks using sudo')
     parser.add_argument('--pause', action='store_true', help='wait for Enter before closing an interactive terminal')
     parser.add_argument('--launch', action='store_true', help='open the report in a supported terminal emulator')
     args = parser.parse_args()
     if args.launch:
-        launch_terminal(args.full)
+        launch_terminal(args.full, args.verbose)
         return
+    previous_display = display_verbose
+    display_verbose = args.verbose
+    if not display_verbose:
+        print('Checking system health…', flush=True)
     authentication_error = ''
     if args.smart and os.geteuid() != 0:
         print('Read-only SMART and package checks require sudo authentication.', flush=True)
@@ -316,10 +478,11 @@ def main():
     say('SYSTEM HEALTH — ' + datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z'))
     say('Read-only checks. Review warnings; NOT CHECKED does not mean healthy.\n')
     if authentication_error:
-        item('NOT CHECKED', 'Privileged check authentication', authentication_error)
-    say('SERVICES AND EVENTS')
+        item('NOT CHECKED', 'Privileged check authentication', authentication_error, group='Disk health')
+    section('Services', 'SERVICES AND EVENTS')
     check_command('Failed system services', ['systemctl', '--failed', '--no-legend', '--plain'], True)
     check_command('Failed user services', ['systemctl', '--user', '--failed', '--no-legend', '--plain'], True)
+    section('History', 'RECENT HISTORY')
     code, out, err = run(['journalctl', '-b', '-p', 'err', '--no-pager', '-q', '-n', '60', '-o', 'short-iso'])
     restricted = restricted_access(err)
     item('NOT CHECKED' if code or restricted else ('WARNING' if out else 'OK'),
@@ -331,15 +494,16 @@ def main():
     else:
         item('NOT CHECKED' if code or restricted_access(err) else ('WARNING' if out else 'OK'),
              'Recorded application crashes in the last 24 hours', out or err)
+    section('Services', 'CLOCK')
     code, out, err = run(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value'])
     item('NOT CHECKED' if code else ('OK' if out == 'yes' else 'WARNING'), 'Clock synchronization', err if code else out)
 
-    say('\nPACKAGES AND CONFIGURATION')
+    section('Packages', '\nPACKAGES AND CONFIGURATION')
     check_command('Package database and dependency consistency', ['pacman', '-Dk'])
     check_command('Potential package linkage issues (checkrebuild)', ['checkrebuild', '-v'], True, 120)
     say('    Review these findings: optional libraries and application-specific search paths can trigger false positives. No packages are rebuilt or removed.')
     code, out, err = run(['pacdiff', '--output'], 60)
-    item('NOT CHECKED' if code else ('WARNING' if out else 'OK'), '.pacnew / .pacsave files to review', out or err)
+    item('NOT CHECKED' if code else ('WARNING' if out else 'OK'), '.pacnew / .pacsave files to review', out or err, group='Config files')
     if args.full:
         say('Checking package file presence; this may take a while…')
         privileged = os.geteuid() == 0 or run(['sudo', '-n', 'true'])[0] == 0
@@ -369,19 +533,21 @@ def main():
     else:
         item('INFO', 'Package file presence check skipped', 'Run: system-health --full')
 
-    say('\nMEMORY AND STORAGE')
+    section('RAM / storage', '\nMEMORY AND STORAGE')
     check_memory()
     check_filesystems()
 
-    say('\nTEMPERATURES')
+    section('Temperatures', '\nTEMPERATURES')
     check_temperatures()
 
-    say('\nDISK HEALTH: SMART / NVMe')
+    section('Disk health', '\nDISK HEALTH: SMART / NVMe')
     check_disks()
 
     say('\nSUMMARY')
     say(' | '.join(f'{key}: {counts[key]}' for key in ['OK', 'WARNING', 'ERROR', 'NOT CHECKED']))
     say('This report does not check package updates, security vulnerabilities, or stability under load.')
+    if not display_verbose:
+        render_compact()
     result = 0
     try:
         path = save_report()
@@ -394,6 +560,7 @@ def main():
             input('\nPress Enter to close…')
         except EOFError:
             pass
+    display_verbose = previous_display
     return result
 
 

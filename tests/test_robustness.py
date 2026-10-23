@@ -164,7 +164,7 @@ class FullReportTests(unittest.TestCase):
             return health.RUN_FAILED, '', 'unavailable'
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(health, 'run', side_effect=command), \
-             patch.object(health.sys, 'argv', ['system-health']), \
+             patch.object(health.sys, 'argv', ['system-health', '--verbose']), \
              patch.dict(os.environ, {'XDG_STATE_HOME': directory}):
             output = self.output_report()
         self.assertIn('[NOT CHECKED] Recorded application crashes', output)
@@ -177,7 +177,7 @@ class FullReportTests(unittest.TestCase):
         return output.getvalue()
 
     def test_missing_sudo_does_not_abort_report(self):
-        with patch.object(health.sys, 'argv', ['system-health', '--smart']), \
+        with patch.object(health.sys, 'argv', ['system-health', '--smart', '--verbose']), \
              patch.object(health.os, 'geteuid', return_value=1000), \
              patch.object(health.subprocess, 'run', side_effect=FileNotFoundError('sudo missing')), \
              patch.object(health, 'run', return_value=(health.RUN_FAILED, '', 'unavailable')), \
@@ -189,7 +189,7 @@ class FullReportTests(unittest.TestCase):
 
     def test_report_write_failure_has_clear_error_and_exit_status(self):
         output, errors = io.StringIO(), io.StringIO()
-        with patch.object(health.sys, 'argv', ['system-health']), \
+        with patch.object(health.sys, 'argv', ['system-health', '--verbose']), \
              patch.object(health, 'run', return_value=(health.RUN_FAILED, '', 'unavailable')), \
              patch.object(health, 'save_report', side_effect=PermissionError('read-only directory')), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -202,7 +202,7 @@ class FullReportTests(unittest.TestCase):
         def command(cmd, timeout=30):
             return (0, 'not JSON', '') if ('smartctl' in cmd or cmd[0] in ('sensors', 'findmnt')) else (0, '', '')
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(health.sys, 'argv', ['system-health']), \
+             patch.object(health.sys, 'argv', ['system-health', '--verbose']), \
              patch.object(health, 'run', side_effect=command), \
              patch.dict(os.environ, {'XDG_STATE_HOME': directory}):
             output = self.output_report()

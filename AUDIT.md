@@ -27,3 +27,16 @@ Tests use temporary directories and a local bare Git remote. No actual AUR
 publication, sudo authentication, disk self-test, installed-package update or
 system configuration change is performed. Live hardware health is outside
 this source audit; SMART behavior is tested with fixtures.
+
+## Compact output — version 0.3.0
+
+The default terminal output is a single grouped overview. Historical events
+are separate from current findings. The full private report retains all
+sanitized diagnostic lines; `--verbose` displays diagnostic detail in the
+terminal. Unavailable checks remain visible, and disk health errors retain
+the ERROR status and a backup recommendation.
+
+Validation: 40 regression tests, including a report with 80 stack-trace lines,
+14 temperature sensors, partial coverage, restricted SMART access and actual
+SMART failure flags. The representative compact output fits within 24 lines
+at a 100-column terminal width. The detailed file retains the complete input.

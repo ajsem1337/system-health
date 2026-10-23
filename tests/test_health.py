@@ -36,7 +36,7 @@ class HealthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = io.StringIO()
             with patch.object(health, 'run', side_effect=command), \
-                 patch.object(health.sys, 'argv', ['system-health', '--full']), \
+                 patch.object(health.sys, 'argv', ['system-health', '--full', '--verbose']), \
                  patch.dict(os.environ, {'XDG_STATE_HOME': directory}), \
                  contextlib.redirect_stdout(output):
                 health.main()
