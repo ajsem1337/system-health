@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -100,6 +102,30 @@ class CheckTests(unittest.TestCase):
             self.assertNotIn('\u202e', value)
             self.assertNotIn('clipboard', value)
             self.assertIn('RED', value)
+
+    def test_terminal_control_strings_handle_st_c1_and_incomplete_input(self):
+        for control in ('\x1b]secret\x1b\\', '\x1bPsecret\x1b\\', '\x9dsecret\x9c',
+                        '\x90secret\x9c', '\x1b^secret\x1b\\', '\x1b_secret\x1b\\'):
+            with self.subTest(control=repr(control)):
+                self.assertEqual(health.clean_text('before' + control + 'after'), 'beforeafter')
+        self.assertEqual(health.clean_text('before\x1b]unterminated'), 'before')
+        self.assertEqual(health.clean_text('before\x1bPunterminated'), 'before')
+        self.assertEqual(health.clean_text('a\x9b31mred\x9b0m\nb\tc'), 'ared\nb\tc')
+
+    def test_repeated_unterminated_controls_finish_within_a_bounded_time(self):
+        # Execute separately so a quadratic implementation cannot hang the suite.
+        code = """
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader('health', sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+health = importlib.util.module_from_spec(spec)
+loader.exec_module(health)
+for prefix in ('\\x1b]', '\\x1bP'):
+    assert health.clean_text('safe' + prefix * 100000) == 'safe'
+"""
+        result = subprocess.run([sys.executable, '-c', code, str(ROOT / 'system-health')],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_report_storage_is_private_and_rejects_directory_symlink(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'XDG_STATE_HOME': directory}):
