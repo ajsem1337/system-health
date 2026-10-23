@@ -26,10 +26,47 @@ colors = {'OK': '32', 'WARNING': '33', 'ERROR': '31', 'NOT CHECKED': '36', 'INFO
 
 def clean_text(value):
     """Keep diagnostics as text, including in the full saved report."""
-    value = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_X].*?\x1b\\|\x1b\[[0-?]*[ -/]*[@-~]', '', str(value), flags=re.S)
-    return ''.join(c for c in value if c in '\n\t' or
-                   (ord(c) >= 32 and not 127 <= ord(c) <= 159 and
-                    c not in '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'))
+    # Scan once: repeated unterminated OSC/DCS strings must not cause the
+    # quadratic backtracking/search behaviour of a terminal-control regexp.
+    output = []
+    state = 'text'
+    escaped = False
+    for c in str(value):
+        if state in ('osc', 'string'):
+            if c in '\x18\x1a\x9c' or (state == 'osc' and c == '\x07') or (escaped and c == '\\'):
+                state = 'text'
+            escaped = c == '\x1b'
+            continue
+        if state == 'escape':
+            if c == '[':
+                state = 'csi'
+            elif c == ']':
+                state = 'osc'
+                escaped = False
+            elif c in 'P^_X':
+                state = 'string'
+                escaped = False
+            elif ' ' <= c <= '/':
+                state = 'escape'  # Intermediate bytes in an ESC sequence.
+            else:
+                state = 'text'
+            continue
+        if state == 'csi':
+            if '@' <= c <= '~' or c in '\x18\x1a':
+                state = 'text'
+            continue
+        if c == '\x1b':
+            state = 'escape'
+        elif c == '\x9b':
+            state = 'csi'
+        elif c == '\x9d':
+            state, escaped = 'osc', False
+        elif c in '\x90\x98\x9e\x9f':
+            state, escaped = 'string', False
+        elif c in '\n\t' or (ord(c) >= 32 and not 127 <= ord(c) <= 159 and
+                              c not in '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'):
+            output.append(c)
+    return ''.join(output)
 
 
 def say(text=''):
